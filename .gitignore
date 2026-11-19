@@ -1,0 +1,5 @@
+build-work/
+out/
+__pycache__/
+*.keystore
+*.jks

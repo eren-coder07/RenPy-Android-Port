@@ -1,0 +1,72 @@
+name: Android Release (universal arm32+arm64)
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - "port/**"
+      - ".github/workflows/android-release.yml"
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up JDK 21
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
+
+      - name: Install Android SDK components
+        run: |
+          yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --licenses > /dev/null || true
+          "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" \
+            "platforms;android-36" "build-tools;36.0.0" "platform-tools" > /dev/null
+          echo "ANDROID_HOME=$ANDROID_HOME" >> "$GITHUB_ENV"
+
+      - name: Prepare release keystore
+        run: |
+          printf '%s' "$ANDROID_KEYSTORE_B64" | base64 -d > "$GITHUB_WORKSPACE/renpy.keystore"
+        env:
+          ANDROID_KEYSTORE_B64: ${{ secrets.ANDROID_KEYSTORE_B64 }}
+
+      - name: Build universal APK (launcher + on-device development)
+        run: python3 port/build_android.py
+        env:
+          RENPY_KEYSTORE: ${{ github.workspace }}/renpy.keystore
+          RENPY_STORE_PASSWORD: ${{ secrets.RENPY_RELEASE_STORE_PASSWORD }}
+          RENPY_KEY_ALIAS: ${{ secrets.RENPY_RELEASE_KEY_ALIAS }}
+          BUILD_WORK: ${{ github.workspace }}/build-work
+          BUILD_OUT: ${{ github.workspace }}/out
+
+      - name: Summarize
+        run: |
+          cd out
+          sha256sum *.apk | tee SHA256SUMS.txt
+          ls -la
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: renpy-engine-android-apk
+          path: |
+            out/*.apk
+            out/SHA256SUMS.txt
+          if-no-files-found: error
+
+      - name: Create GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          TAG="engine-v8.6.1-build.$GITHUB_RUN_NUMBER"
+          gh release create "$TAG" \
+            --title "Ren'Py Engine 8.6.1 - universal Android APK (arm32+arm64)" \
+            --notes "Ren'Py launcher packaged for on-device development. Projects live in /storage/emulated/0/RenPyProjects. Grant 'All files access' on first run (Android 11+)." \
+            out/*.apk out/SHA256SUMS.txt
