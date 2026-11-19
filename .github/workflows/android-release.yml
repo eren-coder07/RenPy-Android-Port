@@ -24,6 +24,9 @@ jobs:
           distribution: temurin
           java-version: "21"
 
+      - name: Install Python deps
+        run: python3 -m pip install --quiet pillow
+
       - name: Install Android SDK components
         run: |
           yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --licenses > /dev/null || true
