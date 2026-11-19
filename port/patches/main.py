@@ -349,7 +349,28 @@ def main():
     # Set renpy.__main__ to this module.
     renpy.__main__ = sys.modules[__name__]  # type: ignore
 
-    renpy.bootstrap.bootstrap(renpy_base)
+    try:
+        renpy.bootstrap.bootstrap(renpy_base)
+    except SystemExit:
+        raise
+    except BaseException:
+        # Crash insurance: dump the full traceback where it can be
+        # retrieved from the device, then let the app die normally
+        # (the Android presplash goes away with it).
+        import traceback
+
+        tb = traceback.format_exc()
+        print(tb, file=sys.stderr)
+        for d in [
+            os.environ.get("ANDROID_PUBLIC", ""),
+            "/storage/emulated/0/RenPyProjects",
+        ]:
+            try:
+                with open(os.path.join(d, "renpy_crash.txt"), "w") as f:
+                    f.write(tb)
+            except Exception:
+                pass
+        raise
 
 
 if __name__ == "__main__":
