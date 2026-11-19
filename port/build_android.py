@@ -19,6 +19,11 @@ How it works (no launcher GUI involved):
    .rpyc with the SDK's own interpreter, headless.
 4. Assemble the "android.dist" tree that rapt.build.build() expects and
    invoke rapt.build.build() directly, exactly like the launcher does.
+   The dist must contain lib/python3.12/ (the pure-python runtime packages:
+   android/, jnius/, truststore, requests, stdlib .pyc) — renpy.loader does
+   `import android.apk` on every android boot and renpy.bootstrap does
+   `import truststore`; without lib/python3.12 the app dies at the
+   loading screen (official dists include it via the "lib/**" pattern).
 5. Gradle produces a signed universal APK (all ABIs from RAPT's prototype:
    armeabi-v7a, arm64-v8a, x86_64).
 """
@@ -37,7 +42,7 @@ BASE_URL = "https://www.renpy.org/dl/" + RENPY_VERSION
 PACKAGE = "org.renpy.engine"
 APP_NAME = "Ren'Py Engine"
 ICON_NAME = "Ren'Py"
-NUMERIC_VERSION = 80601
+NUMERIC_VERSION = 80602
 
 WORK = os.environ.get("BUILD_WORK") or os.path.abspath("build-work")
 OUT = os.environ.get("BUILD_OUT") or os.path.abspath("out")
@@ -282,6 +287,15 @@ def make_dist():
         os.path.join(SDK, "renpy"),
         os.path.join(DIST, "renpy"),
         ignore=shutil.ignore_patterns("__pycache__"),
+    )
+
+    # Pure-python runtime packages. split_renpy() moves lib/ into private/,
+    # which unpacks to ANDROID_PRIVATE/lib/python3.12 — a path the embedded
+    # runtime puts on sys.path. loader.py imports android.apk and
+    # bootstrap.py imports truststore from here on every boot.
+    shutil.copytree(
+        os.path.join(SDK, "lib", "python3.12"),
+        os.path.join(DIST, "lib", "python3.12"),
     )
 
     # Custom bootstrap; split_renpy() renames root *.py to private/main.py.
