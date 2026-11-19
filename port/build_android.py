@@ -9,14 +9,24 @@ them in-process through a custom bootstrap (port/patches/main.py).
 How it works (no launcher GUI involved):
 
 1. Download the official Ren'Py SDK and RAPT for a pinned version.
-2. Patch three files (documented below):
+2. Patch engine and RAPT (documented below):
    - rapt/buildlib/rapt/iconmaker.py : work without pygame_sdl2, find icons
      in the dist "assets/" subdir (where split_renpy() moves them).
    - SDK renpy/loader.py             : skip the packaged game APK asset layer
      when RENPY_PROJECT_GAME_DIR is set (on-device project mode).
+   - SDK renpy/bootstrap.py          : command-mode hooks (engine_process_args
+     / engine_command_completed) so launcher features that spawn a second
+     interpreter on the PC (project scans, lint, compile, gui images,
+     translations) run headless in-process and return to the launcher.
+   - rapt/buildlib/rapt/build.py     : split_renpy() routes gui/, sdk-fonts/,
+     tutorial/ and the_question/ into the private tar, so they unpack to
+     real files on the device (the launcher reads/copies them directly).
+   - rapt/keeplist.txt               : keep the .rpy sources of the template
+     and tutorials (blocklist.txt would strip **.rpy).
    - rapt/templates/app-AndroidManifest.xml : requestLegacyExternalStorage.
-3. Patch the launcher game (front_page.rpy Launch action) and compile it to
-   .rpyc with the SDK's own interpreter, headless.
+   - launcher android/distribute/web/ios labels: notify + return on-device.
+3. Patch the launcher game (front_page.rpy Launch action, mobile_support.rpy)
+   and compile it to .rpyc with the SDK's own interpreter, headless.
 4. Assemble the "android.dist" tree that rapt.build.build() expects and
    invoke rapt.build.build() directly, exactly like the launcher does.
    The dist must contain lib/python3.12/ (the pure-python runtime packages:
@@ -42,7 +52,7 @@ BASE_URL = "https://www.renpy.org/dl/" + RENPY_VERSION
 PACKAGE = "org.renpy.engine"
 APP_NAME = "Ren'Py Engine"
 ICON_NAME = "Ren'Py"
-NUMERIC_VERSION = 80602
+NUMERIC_VERSION = 80603
 
 WORK = os.environ.get("BUILD_WORK") or os.path.abspath("build-work")
 OUT = os.environ.get("BUILD_OUT") or os.path.abspath("out")
@@ -173,7 +183,60 @@ def patch_engine_and_rapt():
 """,
     )
 
-    # --- 3. manifest: legacy external storage for Android 10 ---
+    # --- 3. bootstrap: command-mode hooks (on-device launcher features) ---
+    bootstrap = os.path.join(SDK, "renpy", "bootstrap.py")
+    patch(
+        bootstrap,
+        "                renpy.game.args = args\n",
+        "                renpy.game.args = renpy.__main__.engine_process_args(args) if hasattr(renpy.__main__, \"engine_process_args\") else args\n",
+    )
+    patch(
+        bootstrap,
+        "                renpy.config.basedir = basedir\n",
+        "                renpy.config.basedir = (getattr(renpy.game.args, 'basedir', '') or basedir)\n",
+    )
+    patch(
+        bootstrap,
+        """                renpy.main.main()
+
+                exit_status = 0
+""",
+        """                renpy.main.main()
+
+                exit_status = 0
+
+                # Ren'Py Engine port: after a headless command run (json
+                # dump, lint, compile, gui_images, ...) completes, hand
+                # control back to the launcher instead of exiting the app.
+                renpy.__main__.engine_command_completed() if hasattr(renpy.__main__, "engine_command_completed") else None
+""",
+    )
+
+    # --- 4. split_renpy: ship gui template, sdk fonts and the tutorials as
+    #        unpacked private files. The launcher needs them on disk: the
+    #        New Project flow reads/copies config.renpy_base/gui directly,
+    #        and the font searchpath root is config.renpy_base/sdk-fonts.
+    #        (Everything routed to assets/ would be x-prefixed and only
+    #        readable through the renpy loader.) ---
+    build_py = os.path.join(RAPT, "buildlib", "rapt", "build.py")
+    patch(
+        build_py,
+        """        if fn == "renpy":
+            plat.rename(full_fn, os.path.join(private, fn))
+            continue
+""",
+        """        if fn in ("renpy", "gui", "sdk-fonts", "tutorial", "the_question"):
+            plat.rename(full_fn, os.path.join(private, fn))
+            continue
+""",
+    )
+
+    # --- 5. keeplist: keep the template/tutorial .rpy sources (and fonts)
+    #        that blocklist.txt would strip from the private tar ---
+    keeplist = os.path.join(RAPT, "keeplist.txt")
+    write(keeplist, "\n".join(["", "gui/**", "tutorial/**", "the_question/**", "sdk-fonts/**", ""]))
+
+    # --- 6. manifest: legacy external storage for Android 10 ---
     manifest = os.path.join(RAPT, "templates", "app-AndroidManifest.xml")
     patch(
         manifest,
@@ -181,12 +244,63 @@ def patch_engine_and_rapt():
         'android:hardwareAccelerated="true"\n      android:requestLegacyExternalStorage="true">',
     )
 
-    # --- 4. launcher: Launch Project runs projects on-device ---
+    # --- 7. launcher: Launch Project runs projects on-device ---
     front_page = os.path.join(SDK, "launcher", "game", "front_page.rpy")
     patch_all(
         front_page,
         "action project.Launch()",
         "action mobile_launch_action()",
+    )
+
+    # --- 8. launcher: packaging features that need a PC toolchain notify
+    #        and return on-device instead of crashing ---
+    android_rpy = os.path.join(SDK, "launcher", "game", "android.rpy")
+    patch(
+        android_rpy,
+        """label android:
+
+    if RAPT_PATH is None:
+""",
+        """label android:
+
+    if renpy.android:
+        $ renpy.notify(_("Packaging Android apps is not available on-device."))
+        jump front_page
+
+    if RAPT_PATH is None:
+""",
+    )
+    distribute_rpy = os.path.join(SDK, "launcher", "game", "distribute.rpy")
+    patch(
+        distribute_rpy,
+        """label distribute:
+
+    python hide:
+""",
+        """label distribute:
+
+    if renpy.android:
+        $ renpy.notify(_("Building distributions is not available on-device."))
+        jump front_page
+
+    python hide:
+""",
+    )
+    web_rpy = os.path.join(SDK, "launcher", "game", "web.rpy")
+    patch(
+        web_rpy,
+        """label web:
+
+    if WEB_PATH is None:
+""",
+        """label web:
+
+    if renpy.android:
+        $ renpy.notify(_("Packaging web apps is not available on-device."))
+        jump front_page
+
+    if WEB_PATH is None:
+""",
     )
 
 
@@ -281,6 +395,17 @@ def make_dist():
 
     # Compiled launcher game.
     shutil.copytree(os.path.join(STAGING, "game"), os.path.join(DIST, "game"))
+
+    # GUI template, SDK fonts, tutorial and The Question: needed as REAL
+    # files on the device (the launcher reads/copies them directly), so
+    # the patched split_renpy() routes them into the private tar, which
+    # unpacks to renpy_base/ on the device.
+    for d in ["gui", "sdk-fonts", "tutorial", "the_question"]:
+        shutil.copytree(
+            os.path.join(SDK, d),
+            os.path.join(DIST, d),
+            ignore=shutil.ignore_patterns("__pycache__", "cache"),
+        )
 
     # Engine code (renpy/common is split into assets by rapt.build).
     shutil.copytree(

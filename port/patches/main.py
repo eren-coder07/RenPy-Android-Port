@@ -1,5 +1,5 @@
 #!/usr/bin/env python
-# Ren'Py Engine for Android - custom on-device bootstrap.
+# Ren'Py Engine for Android - custom on-device bootstrap (v2).
 #
 # This file replaces the SDK's renpy.py as the root bootstrap of the
 # android package (rapt's split_renpy() renames root *.py to
@@ -7,7 +7,7 @@
 #
 # It is derived from Ren'Py's renpy.py (MIT license, Copyright
 # 2004-2026 Tom Rothamel) with an added layer that lets the Ren'Py
-# launcher run user projects in-process on the device:
+# launcher run user projects on the device:
 #
 #   launcher "Launch Project"  ->  writes a state file into
 #   ANDROID_PUBLIC             ->  renpy.utter_restart()
@@ -17,6 +17,13 @@
 #                                  RENPY_PROJECT_GAME_DIR so the patched
 #                                  engine loader skips the packaged game
 #                                  asset layer.
+#
+# v2 adds *command mode*: launcher features that on the PC spawn a
+# second interpreter (project scan dumps, lint, compile, gui image
+# generation, translations, ...) instead re-run renpy in-process with
+# the command's argv, then automatically boot the launcher again. The
+# bootstrap.py hooks (engine_process_args / engine_command_completed)
+# are installed by port/build_android.py.
 #
 # Each process start reads the generation counter once; the packaged
 # launcher boots on the first run and whenever the generation has not
@@ -52,47 +59,39 @@ def _read_state():
     return {}
 
 
+def _update_state(**kw):
+    """Atomically merges fields into the hand-off state file."""
+    state = _read_state()
+    state.update(kw)
+    try:
+        tmp = _state_file() + ".tmp"
+        with open(tmp, "w") as f:
+            json.dump(state, f)
+        try:
+            os.chmod(tmp, 0o666)
+        except Exception:
+            pass
+        os.replace(tmp, _state_file())
+    except Exception:
+        pass
+
+
 # Snapshot of the generation counter at process start. A "Launch Project"
 # tap writes a NEW generation from the launcher; while it is greater than
 # the snapshot, the bootstrap loop boots that project instead of the
 # packaged launcher.
 _START_GENERATION = _read_state().get("generation") or 0
 
+# Command line (after argv[0]) of the headless command currently being
+# run, or None when not in command mode. Used by engine_process_args().
+_engine_command_args = None
 
-def path_to_gamedir(basedir, name):
+
+def _launcher_gamedir(basedir, name):
     """
-    Returns the absolute path to the directory containing the game
-    scripts and assets. (This becomes config.gamedir.)
-
-    In project mode, the project's game directory on the device
-    filesystem is returned, and RENPY_PROJECT_GAME_DIR is exported for
-    the patched engine loader (it must not merge the packaged game
-    assets while a user project is running).
+    Returns the gamedir of the packaged launcher, using the stock
+    renpy.py candidate logic.
     """
-    global _project_gamedir
-
-    state = _read_state()
-    target = state.get("run_gamedir")
-    generation = state.get("generation") or 0
-
-    if (
-        _project_gamedir is None
-        and "ANDROID_PRIVATE" in os.environ
-        and target
-        and generation > _START_GENERATION
-        and os.path.isdir(target)
-    ):
-        _project_gamedir = target
-        os.environ["RENPY_PROJECT_GAME_DIR"] = target
-        print("Ren'Py Engine: running project", target)
-    elif _project_gamedir is None:
-        # Launcher mode: make sure no stale project mode is active.
-        os.environ.pop("RENPY_PROJECT_GAME_DIR", None)
-
-    if _project_gamedir is not None:
-        return _project_gamedir
-
-    # Default behavior: boot the packaged launcher (from the APK assets).
     candidates = [name]
 
     game_name = name
@@ -119,6 +118,112 @@ def path_to_gamedir(basedir, name):
         gamedir = basedir
 
     return gamedir
+
+
+def path_to_gamedir(basedir, name):
+    """
+    Returns the absolute path to the directory containing the game
+    scripts and assets. (This becomes config.gamedir.)
+
+    In project mode, the project's game directory on the device
+    filesystem is returned, and RENPY_PROJECT_GAME_DIR is exported for
+    the patched engine loader (it must not merge the packaged game
+    assets while a user project is running).
+    """
+    global _project_gamedir, _engine_command_args, _START_GENERATION
+
+    state = _read_state()
+    target = state.get("run_gamedir")
+    generation = state.get("generation") or 0
+
+    # A completed command run hands control back to the launcher.
+    if state.get("return_to_launcher"):
+        _update_state(
+            return_to_launcher=0,
+            pending_cmd=0,
+            run_gamedir=None,
+            run_args=None,
+            run_env=None,
+        )
+        # Forget the last launch so a stray utter_restart (language
+        # change, ...) stays in launcher mode.
+        _START_GENERATION = max(_START_GENERATION, generation)
+        _project_gamedir = None
+        _engine_command_args = None
+        os.environ.pop("RENPY_PROJECT_GAME_DIR", None)
+        os.environ.pop("RENPY_ENGINE_COMMAND_MODE", None)
+        sys.argv = [sys.argv[0]]
+        return _launcher_gamedir(basedir, name)
+
+    if (
+        _project_gamedir is None
+        and "ANDROID_PRIVATE" in os.environ
+        and target
+        and generation > _START_GENERATION
+        and os.path.isdir(target)
+    ):
+        _project_gamedir = target
+        os.environ["RENPY_PROJECT_GAME_DIR"] = target
+
+        args = state.get("run_args") or []
+        if args:
+            # Command mode: json-dump / lint / compile / gui_images / ...
+            _engine_command_args = [str(i) for i in args]
+            os.environ["RENPY_ENGINE_COMMAND_MODE"] = "1"
+            sys.argv = [sys.argv[0]] + _engine_command_args
+
+        for k, v in (state.get("run_env") or {}).items():
+            os.environ[str(k)] = str(v)
+
+        print("Ren'Py Engine: running project", target, args if args else "(interactive)")
+    elif _project_gamedir is None:
+        # Launcher mode: make sure no stale project mode is active.
+        os.environ.pop("RENPY_PROJECT_GAME_DIR", None)
+
+    if _project_gamedir is not None:
+        return _project_gamedir
+
+    return _launcher_gamedir(basedir, name)
+
+
+def engine_process_args(default_args):
+    """
+    Called by the patched bootstrap loop (renpy/bootstrap.py) instead of
+    reusing the process-start argument parse.
+
+    In command mode, sys.argv has already been switched to the command
+    line by path_to_gamedir(); re-parse it with renpy's real argument
+    parser so headless commands work exactly like
+    `renpy.sh <project> <command>` does on the PC.
+    """
+    global _engine_command_args
+
+    if _engine_command_args:
+        return renpy.arguments.bootstrap()
+
+    return default_args
+
+
+def engine_command_completed():
+    """
+    Called by the patched bootstrap loop right after renpy.main.main()
+    returns normally.
+
+    In command mode the command's output (json dump, lint.txt, generated
+    images, ...) has been written; hand control back to the launcher by
+    re-raising UtterRestartException, which the bootstrap loop catches
+    to boot the launcher again.
+    """
+    global _engine_command_args
+
+    if os.environ.pop("RENPY_ENGINE_COMMAND_MODE", None):
+        _engine_command_args = None
+        sys.argv = [sys.argv[0]]
+        _update_state(return_to_launcher=1, pending_cmd=0, cmd_failures=0)
+
+        import renpy.game  # @UnresolvedImport
+
+        raise renpy.game.UtterRestartException()
 
 
 def path_to_common(renpy_base):
@@ -195,7 +300,7 @@ def path_to_saves(gamedir, save_directory=None):  # type: (str, str|None) -> str
             NSSearchPathDomainMask.NSUserDomainMask,
         ).lastObject()
 
-        # url.path seems to change type based on iOS version, for some reason.
+        # url.path seems to change type based on Android version, for some reason.
         try:
             rv = url.path().UTF8String()
         except Exception:
@@ -259,7 +364,8 @@ def path_to_renpy_base():
 
 def path_to_logdir(basedir):
     """
-    Returns the absolute path to the log directory.
+    Returns the absolute path to the directory where Ren'Py will write
+    log and error files.
     """
     import renpy  # @UnresolvedImport
 

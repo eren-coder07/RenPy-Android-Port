@@ -71,5 +71,5 @@ jobs:
           TAG="engine-v8.6.1-build.$GITHUB_RUN_NUMBER"
           gh release create "$TAG" \
             --title "Ren'Py Engine 8.6.1 - universal Android APK (arm32+arm64)" \
-            --notes "Ren'Py launcher packaged for on-device development. Projects live in /storage/emulated/0/RenPyProjects. Grant 'All files access' on first run (Android 11+)." \
+            --notes "Ren'Py launcher packaged for on-device development. Launcher UI fonts fixed (first-run language chooser), New Project works on-device (gui template + sdk fonts shipped on disk), tutorial + The Question bundled, launcher commands (scan/lint/compile/gui images) run headless in-process and return to the launcher, packaging screens notify instead of crashing. Projects live in /storage/emulated/0/RenPyProjects (grant 'All files access' on Android 11+, or the app uses its own external directory)." \
             out/*.apk out/SHA256SUMS.txt
