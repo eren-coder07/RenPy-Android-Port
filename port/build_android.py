@@ -52,7 +52,7 @@ BASE_URL = "https://www.renpy.org/dl/" + RENPY_VERSION
 PACKAGE = "org.renpy.engine"
 APP_NAME = "Ren'Py Engine"
 ICON_NAME = "Ren'Py"
-NUMERIC_VERSION = 80603
+NUMERIC_VERSION = 80604
 
 WORK = os.environ.get("BUILD_WORK") or os.path.abspath("build-work")
 OUT = os.environ.get("BUILD_OUT") or os.path.abspath("out")
