@@ -726,6 +726,8 @@ screen ms_text_viewer(title, text, filename=None, line=None):
 
 screen ms_storage_nag():
 
+    zorder 150
+
     if renpy.android and not _ms_all_files_access():
 
         frame:
@@ -743,7 +745,10 @@ screen ms_storage_nag():
 
 init 1000 python:
     if renpy.android:
-        config.overlay_screens.append("ms_storage_nag")
+        # always_shown_screens, not overlay_screens: the launcher's pages
+        # are called screens, which suppress overlays (the button was
+        # tappable but invisible).
+        config.always_shown_screens.append("ms_storage_nag")
 
         # "Open Directory" buttons on the front page would try to spawn a
         # desktop file manager. Point the user at the folder instead.

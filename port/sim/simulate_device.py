@@ -118,7 +118,47 @@ def package(device):
     print("device ready:", device)
 
 
-def run(device, seconds, steps, restarts, extra_env, fresh):
+# Where a real device keeps the app's directories (package org.renpy.engine).
+ANDROID_LINKS = {
+    "private": "/data/user/0/org.renpy.engine/files",
+    "public": "/storage/emulated/0/Android/data/org.renpy.engine/files",
+}
+ANDROID_SHARED = "/storage/emulated/0"
+
+
+def android_paths(paths):
+    """
+    --android-paths: expose the simulated device under the paths a real
+    phone uses (symbolic links, needs root), so screenshots and logs show
+    /storage/emulated/0/RenPyProjects instead of the simulator's directory.
+    Returns the paths the engine should see.
+    """
+
+    links = {
+        ANDROID_LINKS["private"]: paths["private"],
+        ANDROID_LINKS["public"]: paths["public"],
+        os.path.join(ANDROID_SHARED, "RenPyProjects"): os.path.join(paths["shared"], "RenPyProjects"),
+    }
+
+    for link, target in links.items():
+        os.makedirs(target, exist_ok=True)
+        os.makedirs(os.path.dirname(link), exist_ok=True)
+
+        if os.path.islink(link):
+            os.unlink(link)
+        elif os.path.exists(link):
+            raise SystemExit("%s exists and is not a link; refusing to replace it." % link)
+
+        os.symlink(target, link)
+
+    rv = dict(paths)
+    rv["private"] = ANDROID_LINKS["private"]
+    rv["public"] = ANDROID_LINKS["public"]
+    rv["shared"] = ANDROID_SHARED
+    return rv
+
+
+def run(device, seconds, steps, restarts, extra_env, fresh, use_android_paths=False):
     import time
 
     paths = device_paths(device)
@@ -131,14 +171,16 @@ def run(device, seconds, steps, restarts, extra_env, fresh):
             shutil.rmtree(paths[k], ignore_errors=True)
             os.makedirs(paths[k])
 
+    seen = android_paths(paths) if use_android_paths else paths
+
     env = dict(os.environ)
     env.update(
         {
-            "ANDROID_PRIVATE": paths["private"],
-            "ANDROID_PUBLIC": paths["public"],
+            "ANDROID_PRIVATE": seen["private"],
+            "ANDROID_PUBLIC": seen["public"],
             "ANDROID_OLD_PUBLIC": paths["old_public"],
             "ANDROID_APK": paths["apk"],
-            "RENPY_ENGINE_SHARED_STORAGE": paths["shared"],
+            "RENPY_ENGINE_SHARED_STORAGE": seen["shared"],
             "SDL_AUDIODRIVER": "dummy",
             # SDL's offscreen driver renders to a real-size EGL pbuffer
             # (Mesa llvmpipe): no X server needed, and screenshots work.
@@ -193,9 +235,9 @@ def run(device, seconds, steps, restarts, extra_env, fresh):
         print("=== simulated app start #%d ===" % (i + 1), flush=True)
 
         p = subprocess.Popen(
-            [python, "-X", "utf8", os.path.join(HERE, "stubs", "sim_boot.py"), os.path.join(paths["private"], "main.py")],
+            [python, "-X", "utf8", os.path.join(HERE, "stubs", "sim_boot.py"), os.path.join(seen["private"], "main.py")],
             env=env,
-            cwd=paths["private"],
+            cwd=seen["private"],
         )
 
         deadline = time.time() + seconds
@@ -244,12 +286,13 @@ def main():
     ap.add_argument("--fresh", action="store_true", help="wipe app data first (new install)")
     ap.add_argument("--restarts", type=int, default=0)
     ap.add_argument("--env", action="append", default=[])
+    ap.add_argument("--android-paths", action="store_true", help="show real Android paths (symlinks; needs root)")
     args = ap.parse_args()
 
     if args.command == "package":
         package(args.device)
     else:
-        statuses = run(args.device, args.seconds, args.steps, args.restarts, args.env, args.fresh)
+        statuses = run(args.device, args.seconds, args.steps, args.restarts, args.env, args.fresh, args.android_paths)
         print("statuses:", statuses)
 
 

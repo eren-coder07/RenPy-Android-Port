@@ -25,6 +25,11 @@ def main():
     argv = sys.argv[1:]
     shots = os.path.join(WORK, "sim-shots")
 
+    extra = []
+    if "--android-paths" in argv:
+        argv.remove("--android-paths")
+        extra.append("--android-paths")
+
     if "--shots" in argv:
         i = argv.index("--shots")
         shots = os.path.abspath(argv[i + 1])
@@ -47,7 +52,7 @@ def main():
 
         with open(log, "w") as f:
             subprocess.run(
-                [sys.executable, os.path.join(HERE, "simulate_device.py"), "run", "--fresh", "--seconds", "400", "--steps", sc],
+                [sys.executable, os.path.join(HERE, "simulate_device.py"), "run", "--fresh", "--seconds", "400", "--steps", sc] + extra,
                 stdout=f,
                 stderr=subprocess.STDOUT,
             )
