@@ -348,9 +348,17 @@ label start:
 
     if renpy.android:
         try:
-            import renpy.editor
+            # NOTE: never use a bare `import renpy.editor` here. Executed in
+            # the store, that statement rebinds the store's `renpy` name to
+            # the renpy *package* module, destroying the renpy.exports
+            # binding that minstore.py sets up (renpy.has_image, renpy.music,
+            # renpy.execute_default_statement, ... all disappear) and the
+            # launcher dies right after the presplash. import_module()
+            # touches no store names.
+            import importlib as _ms_importlib
 
-            renpy.editor.editor = _MSEditorStub()
+            _ms_renpy_editor = _ms_importlib.import_module("renpy.editor")
+            _ms_renpy_editor.editor = _MSEditorStub()
         except Exception:
             pass
 
@@ -391,3 +399,19 @@ init 1000 python:
                 renpy.notify(_("Use a file manager app to open: %s") % self.path)
 
         OpenDirectory = _MSOpenDirectory
+
+
+# Last-resort store repair. Some init block may have executed a bare
+# `import renpy...` statement (any .rpy init code that does so rebinds the
+# store's `renpy` name to the renpy package module, hiding renpy.exports).
+# Restore the exports binding before the first script statement runs.
+init 9999 python:
+    try:
+        import importlib as _ms_importlib
+
+        _ms_exports = _ms_importlib.import_module("renpy.exports")
+
+        if renpy.store.renpy is not _ms_exports:
+            renpy.store.renpy = _ms_exports
+    except Exception:
+        pass
