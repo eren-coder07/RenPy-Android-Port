@@ -12,12 +12,17 @@ How it works (no launcher GUI involved):
 2. Patch engine and RAPT (documented below):
    - rapt/buildlib/rapt/iconmaker.py : work without pygame_sdl2, find icons
      in the dist "assets/" subdir (where split_renpy() moves them).
+   - SDK renpy/editor.py             : SystemEditor hands files to the
+     launcher's built-in viewer on Android (no editor process).
+   - SDK renpy/lint.py               : treat APK-loaded common files as common.
+   - SDK renpy/translation/*.py      : no common directory on disk on Android.
    - SDK renpy/loader.py             : skip the packaged game APK asset layer
      when RENPY_PROJECT_GAME_DIR is set (on-device project mode).
-   - SDK renpy/bootstrap.py          : command-mode hooks (engine_process_args
-     / engine_command_completed) so launcher features that spawn a second
-     interpreter on the PC (project scans, lint, compile, gui images,
-     translations) run headless in-process and return to the launcher.
+   - SDK renpy/bootstrap.py          : engine-session hooks (engine_process_args
+     / engine_session_ended, see port/patches/main.py) so projects and the
+     launcher features that spawn a second interpreter on the PC (project
+     scans, lint, compile, gui images, translations) run in-process and
+     always return to the launcher - never exit the app.
    - rapt/buildlib/rapt/build.py     : split_renpy() routes gui/, sdk-fonts/,
      tutorial/ and the_question/ into the private tar, so they unpack to
      real files on the device (the launcher reads/copies them directly).
@@ -52,7 +57,7 @@ BASE_URL = "https://www.renpy.org/dl/" + RENPY_VERSION
 PACKAGE = "org.renpy.engine"
 APP_NAME = "Ren'Py Engine"
 ICON_NAME = "Ren'Py"
-NUMERIC_VERSION = 80604
+NUMERIC_VERSION = 80605
 
 WORK = os.environ.get("BUILD_WORK") or os.path.abspath("build-work")
 OUT = os.environ.get("BUILD_OUT") or os.path.abspath("out")
@@ -117,10 +122,28 @@ def fetch_sources():
     os.makedirs(WORK, exist_ok=True)
     download(f"{BASE_URL}/renpy-{RENPY_VERSION}-sdk.tar.bz2", os.path.join(WORK, "sdk.tar.bz2"))
     download(f"{BASE_URL}/renpy-{RENPY_VERSION}-rapt.zip", os.path.join(WORK, "rapt.zip"))
-    if not os.path.isdir(SDK):
-        run(["tar", "xjf", os.path.join(WORK, "sdk.tar.bz2"), "-C", WORK])
-    if not os.path.isdir(RAPT):
-        run(["unzip", "-q", os.path.join(WORK, "rapt.zip"), "-d", WORK])
+
+    # The patches below edit the SDK and RAPT in place, so always start
+    # from freshly extracted copies (a second run on a patched tree would
+    # fail on the patch anchors). RAPT's gradle project/ and bin/ are
+    # kept, so incremental Gradle builds still work.
+    if os.path.isdir(SDK):
+        shutil.rmtree(SDK)
+    run(["tar", "xjf", os.path.join(WORK, "sdk.tar.bz2"), "-C", WORK])
+
+    keep = {}
+    if os.path.isdir(RAPT):
+        for d in ("project", "bin"):
+            src = os.path.join(RAPT, d)
+            if os.path.isdir(src):
+                keep[d] = os.path.join(WORK, "rapt-keep-" + d)
+                if os.path.isdir(keep[d]):
+                    shutil.rmtree(keep[d])
+                os.rename(src, keep[d])
+        shutil.rmtree(RAPT)
+    run(["unzip", "-q", os.path.join(WORK, "rapt.zip"), "-d", WORK])
+    for d, tmp in keep.items():
+        os.rename(tmp, os.path.join(RAPT, d))
 
 
 def patch_engine_and_rapt():
@@ -183,7 +206,15 @@ def patch_engine_and_rapt():
 """,
     )
 
-    # --- 3. bootstrap: command-mode hooks (on-device launcher features) ---
+    # --- 3. bootstrap: engine-session hooks (port/patches/main.py). The
+    #        launcher runs projects and project commands in-process; the
+    #        bootstrap loop must start queued jobs, re-parse their command
+    #        lines, and - whenever a run ends (quit, end of a command,
+    #        parse errors, uncaught exception) - go back to the launcher
+    #        instead of exiting the app. NOTE: renpy.main.main() never
+    #        returns normally (commands and quitting both raise
+    #        QuitException), so the hook must run after the except
+    #        clauses, not after main(). ---
     bootstrap = os.path.join(SDK, "renpy", "bootstrap.py")
     patch(
         bootstrap,
@@ -193,22 +224,173 @@ def patch_engine_and_rapt():
     patch(
         bootstrap,
         "                renpy.config.basedir = basedir\n",
-        "                renpy.config.basedir = (getattr(renpy.game.args, 'basedir', '') or basedir)\n",
+        "                renpy.config.basedir = os.path.abspath(getattr(renpy.game.args, \"basedir\", None) or basedir)\n",
     )
     patch(
         bootstrap,
-        """                renpy.main.main()
-
-                exit_status = 0
+        """            except renpy.game.UtterRestartException:
+                # On an UtterRestart, reload Ren'Py.
+                renpy.reload_all()
 """,
-        """                renpy.main.main()
+        """            except renpy.game.UtterRestartException:
+                # On an UtterRestart, reload Ren'Py.
+                getattr(renpy.__main__, "engine_reload", renpy.reload_all)()
+""",
+    )
+    patch(
+        bootstrap,
+        """                if e.relaunch:
+                    relaunch()
+""",
+        """                if e.relaunch:
+                    if renpy.android:
+                        # No second process on Android: restart in-process.
+                        getattr(renpy.__main__, "engine_reload", renpy.reload_all)()
+                        exit_status = None
+                    else:
+                        relaunch()
+""",
+    )
+    patch(
+        bootstrap,
+        """            except Exception as e:
+                # If exception was raised outside of Ren'Py execution context,
+                # or context was unable to handle it, report it here.
+                renpy.error.report_exception(e, editor=True)
+""",
+        """            except SystemExit as e:
+                # Ren'Py Engine port: a project (or an invalid command line,
+                # via argparse) called sys.exit(). Only the launcher may
+                # end the app.
+                if getattr(renpy.__main__, "engine_mode", lambda: "launcher")() != "project":
+                    raise
 
-                exit_status = 0
+                exit_status = e.code if isinstance(e.code, int) else 1
 
-                # Ren'Py Engine port: after a headless command run (json
-                # dump, lint, compile, gui_images, ...) completes, hand
-                # control back to the launcher instead of exiting the app.
-                renpy.__main__.engine_command_completed() if hasattr(renpy.__main__, "engine_command_completed") else None
+            except Exception as e:
+                # If exception was raised outside of Ren'Py execution context,
+                # or context was unable to handle it, report it here.
+                renpy.error.report_exception(e, editor=True)
+
+            # Ren'Py Engine port: a project run or project command ended -
+            # continue with the next queued job or the launcher instead of
+            # exiting the app.
+            if (exit_status is not None) and hasattr(renpy.__main__, "engine_session_ended"):
+                if renpy.__main__.engine_session_ended(exit_status):
+                    # (engine_reload: reload_all() that survives runs that
+                    # never opened the display.)
+                    renpy.__main__.engine_reload()
+                    exit_status = None
+""",
+    )
+
+    patch(
+        bootstrap,
+        """        if renpy.android:
+            from jnius import autoclass  # type: ignore
+
+            import android
+
+            android.activity.finishAndRemoveTask()
+""",
+        """        if renpy.android:
+            # Ren'Py Engine port: System.exit() below ends the process at
+            # once; dump an exception that is on its way out first.
+            if hasattr(renpy.__main__, "engine_before_exit"):
+                renpy.__main__.engine_before_exit()
+
+            from jnius import autoclass  # type: ignore
+
+            import android
+
+            android.activity.finishAndRemoveTask()
+""",
+    )
+
+    # --- 3b. editor: there is no editor process to spawn on Android. The
+    #         SystemEditor hands the files to the bootstrap, which forwards
+    #         them to the launcher's built-in file viewer. ---
+    editor_py = os.path.join(SDK, "renpy", "editor.py")
+    patch(
+        editor_py,
+        """class SystemEditor(Editor):
+    def open(self, filename, line=None, **kwargs):
+        try:
+""",
+        """class SystemEditor(Editor):
+    # Ren'Py Engine port: on Android, collect the files of a transaction
+    # and let the launcher show them (port/patches/main.py).
+    def begin(self, new_window=False, **kwargs):
+        self.android_files = []
+
+    def end(self, **kwargs):
+        files = getattr(self, "android_files", [])
+        self.android_files = []
+
+        hook = getattr(renpy.__main__, "engine_open_files", None)
+
+        if files and (hook is not None):
+            hook(files)
+
+    def open(self, filename, line=None, **kwargs):
+        if renpy.android:
+            if not hasattr(self, "android_files"):
+                self.android_files = []
+
+            self.android_files.append((filename, line))
+            return
+
+        try:
+""",
+    )
+
+    # --- 3c. lint: on Android the common files are read from the APK, and
+    #         their nodes are named "00db.rpy" instead of
+    #         "renpy/common/00db.rpy", so lint reported problems in Ren'Py's
+    #         own files. Project files are always "game/...". ---
+    lint_py = os.path.join(SDK, "renpy", "lint.py")
+    patch(
+        lint_py,
+        """    if filename.startswith("common/") or filename.startswith("renpy/common/"):
+        return True
+""",
+        """    if filename.startswith("common/") or filename.startswith("renpy/common/"):
+        return True
+    elif renpy.android and not filename.startswith("/") and not filename.startswith("game/"):
+        return True
+""",
+    )
+
+    # --- 3d. translations: config.commondir is None on Android (the common
+    #         files are in the APK), and these normpath(None) calls crashed
+    #         the translate / dialogue commands (Generate Translations,
+    #         Extract Dialogue, and the string step of New Project). ---
+    generation_py = os.path.join(SDK, "renpy", "translation", "generation.py")
+    patch(
+        generation_py,
+        """    commondir = os.path.normpath(renpy.config.commondir)  # type: ignore
+    gamedir = os.path.normpath(renpy.config.gamedir)
+
+    if filename.startswith(commondir):
+""",
+        """    commondir = os.path.normpath(renpy.config.commondir) if renpy.config.commondir else None  # type: ignore
+    gamedir = os.path.normpath(renpy.config.gamedir)
+
+    if commondir and filename.startswith(commondir):
+""",
+    )
+    dialogue_py = os.path.join(SDK, "renpy", "translation", "dialogue.py")
+    patch(
+        dialogue_py,
+        """        commondir = os.path.normpath(renpy.config.commondir)  # type: ignore
+
+        if filename.startswith(commondir):
+            return
+""",
+        """        commondir = os.path.normpath(renpy.config.commondir) if renpy.config.commondir else None  # type: ignore
+
+        if commondir and filename.startswith(commondir):
+            return
 """,
     )
 
@@ -225,7 +407,7 @@ def patch_engine_and_rapt():
             plat.rename(full_fn, os.path.join(private, fn))
             continue
 """,
-        """        if fn in ("renpy", "gui", "sdk-fonts", "tutorial", "the_question"):
+        """        if fn in ("renpy", "gui", "sdk-fonts", "tutorial", "the_question", "launcher"):
             plat.rename(full_fn, os.path.join(private, fn))
             continue
 """,
@@ -234,7 +416,27 @@ def patch_engine_and_rapt():
     # --- 5. keeplist: keep the template/tutorial .rpy sources (and fonts)
     #        that blocklist.txt would strip from the private tar ---
     keeplist = os.path.join(RAPT, "keeplist.txt")
-    write(keeplist, "\n".join(["", "gui/**", "tutorial/**", "the_question/**", "sdk-fonts/**", ""]))
+    write(keeplist, "\n".join(["", "gui/**", "tutorial/**", "the_question/**", "sdk-fonts/**", "launcher/**", ""]))
+
+    # --- 5b. New Project: the template's translated code is looked up in
+    #         the launcher's game directory, which on Android is inside the
+    #         APK. Fall back to the on-disk copy shipped by make_dist(). ---
+    gui7_code = os.path.join(SDK, "launcher", "game", "gui7", "code.py")
+    patch(
+        gui7_code,
+        """        src = os.path.join(renpy.config.gamedir, "tl", language, fn + "m")
+
+        if not os.path.exists(src):
+""",
+        """        src = os.path.join(renpy.config.gamedir, "tl", language, fn + "m")
+
+        if not os.path.exists(src):
+            # Ren'Py Engine port: on-disk copy (the launcher game is in the APK).
+            src = os.path.join(renpy.config.renpy_base, "launcher", "game", "tl", language, fn + "m")
+
+        if not os.path.exists(src):
+""",
+    )
 
     # --- 6. manifest: legacy external storage for Android 10 ---
     manifest = os.path.join(RAPT, "templates", "app-AndroidManifest.xml")
@@ -407,6 +609,24 @@ def make_dist():
             ignore=shutil.ignore_patterns("__pycache__", "cache"),
         )
 
+    # Launcher files that New Project reads from disk (relative to
+    # renpy_base) rather than through the loader: the icon template and
+    # the translated gui template code. The launcher game itself is in the
+    # APK, so ship copies as real files (routed to the private tar).
+    launcher_disk = os.path.join(DIST, "launcher", "game")
+    os.makedirs(os.path.join(launcher_disk, "gui7"))
+    # project.json marks the directory "hidden" in the project list.
+    shutil.copy(os.path.join(SDK, "launcher", "project.json"), os.path.join(DIST, "launcher", "project.json"))
+    shutil.copy(os.path.join(STAGING, "game", "gui7", "icon.png"), os.path.join(launcher_disk, "gui7", "icon.png"))
+    tl = os.path.join(STAGING, "game", "tl")
+    for lang in sorted(os.listdir(tl)):
+        if not os.path.isdir(os.path.join(tl, lang)):
+            continue
+        for fn in os.listdir(os.path.join(tl, lang)):
+            if fn.endswith(".rpym"):
+                os.makedirs(os.path.join(launcher_disk, "tl", lang), exist_ok=True)
+                shutil.copy(os.path.join(tl, lang, fn), os.path.join(launcher_disk, "tl", lang, fn))
+
     # Engine code (renpy/common is split into assets by rapt.build).
     shutil.copytree(
         os.path.join(SDK, "renpy"),
@@ -505,12 +725,19 @@ def build_apk():
 
 
 def main():
+    # --stage-only: patch, compile the launcher and assemble android.dist,
+    # but skip Gradle (used by port/sim/simulate_device.py).
+    stage_only = "--stage-only" in sys.argv[1:]
+
     fetch_sources()
     patch_engine_and_rapt()
     prepare_launcher_project()
     compile_launcher()
     make_dist()
-    build_apk()
+
+    if not stage_only:
+        build_apk()
+
     print("DONE")
 
 

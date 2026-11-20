@@ -1,0 +1,10 @@
+[["wait", 1], ["click", "Start using Ren'Py in English"], ["wait", 2],
+ ["py", "import os\nfor n, src in [('Broken Runtime', 'label start:\\n    \"Before the error.\"\\n    $ 1/0\\n    \"never\"\\n')]:\n    d = os.path.join(persistent.projects_directory, n, 'game')\n    os.makedirs(d, exist_ok=True)\n    open(os.path.join(d, 'script.rpy'), 'w').write(src)"],
+ ["click", "refresh"], ["wait", 1],
+ ["click", "Broken Runtime"], ["wait", 1], ["click", "Launch Project"], ["wait", 5],
+ ["tap"], ["wait", 3],
+ ["expect", "ZeroDivisionError"], ["shot", "game-exception"],
+ ["click", "Quit"], ["wait", 5],
+ ["expect", "ZeroDivisionError"], ["expect", "Close"], ["shot", "error-report-in-launcher"],
+ ["click", "Close"], ["wait", 1.5],
+ ["expect", "Launch Project"], ["expect", "selected Select project Broken Runtime"]]

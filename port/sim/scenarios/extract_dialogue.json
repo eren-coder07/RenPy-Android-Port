@@ -1,0 +1,7 @@
+[["wait", 1], ["click", "Start using Ren'Py in English"], ["wait", 2],
+ ["click", "Example Game"], ["wait", 1],
+ ["click", "Extract Dialogue"], ["wait", 2], ["shot", "extract-dialogue-screen"],
+ ["click", "Continue"], ["wait", 15],
+ ["expect", "finished extracting dialogue"],
+ ["py", "import os\np = os.path.join(persistent.projects_directory, 'Example Game', 'dialogue.tab')\n_sim_log('DIALOGUE', open(p).read()[:200])\nassert 'Eileen' in open(p).read() or 'Welcome' in open(p).read()"],
+ ["click", "Continue"], ["wait", 2], ["expect", "Launch Project"]]
