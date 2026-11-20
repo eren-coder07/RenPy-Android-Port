@@ -11,6 +11,7 @@
  ["click", "Return"], ["wait", 1.5],
  ["click", "Check Script (Lint)"], ["wait", 7],
  ["expect", "lint report"], ["expect", "Statistics"], ["shot", "lint-report"],
+ ["py", "assert not _sim_click('Open in editor app'), 'lint.txt is private: no editor button'"],
  ["click", "Close"], ["wait", 1.5], ["expect", "Launch Project"],
  ["click", "Force Recompile"], ["wait", 7], ["expect", "Launch Project"],
  ["click", "Delete Persistent"], ["wait", 7], ["expect", "Launch Project"],

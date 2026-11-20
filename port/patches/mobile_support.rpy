@@ -512,6 +512,18 @@ init 1 python:
     def _ms_view_file(fn, line=None):
         renpy.invoke_in_new_context(_ms_show_text, _ms_os.path.basename(fn), _ms_read_text(fn), fn, line)
 
+    def _ms_can_open_in_app(fn):
+        """
+        Editor apps can only reach shared storage (the FileProvider serves
+        it); files in the app's private directory, like the lint report,
+        can't be handed over.
+        """
+        if not (fn and renpy.android):
+            return False
+
+        fn = _ms_os.path.abspath(fn)
+        return fn.startswith(_ms_shared_storage().rstrip("/") + "/") or fn.startswith(_ms_os.environ.get("ANDROID_PUBLIC", "//") + "/")
+
     def _ms_open_in_app(fn):
         """
         Asks Android to open `fn` in a text editor app. Uses the app's
@@ -716,7 +728,7 @@ screen ms_text_viewer(title, text, filename=None, line=None):
                 xalign 1.0
                 spacing 40
 
-                if filename and renpy.android:
+                if _ms_can_open_in_app(filename):
                     textbutton _("Open in editor app") action Function(_ms_open_in_app, filename) text_size 24 text_color "#8cc8ff" text_hover_color "#ffffff"
 
                 textbutton _("Close") action Return(True) text_size 24 text_color "#ffd28c" text_hover_color "#ffffff"
