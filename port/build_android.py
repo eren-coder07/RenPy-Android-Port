@@ -30,7 +30,8 @@ How it works (no launcher GUI involved):
      and tutorials (blocklist.txt would strip **.rpy).
    - rapt/templates/app-AndroidManifest.xml : requestLegacyExternalStorage.
    - launcher android/distribute/web/ios labels: notify + return on-device.
-3. Patch the launcher game (front_page.rpy Launch action, mobile_support.rpy)
+3. Patch the launcher game (front_page.rpy Launch action, phone-width
+   layout in options.rpy/style.rpy, mobile_support.rpy)
    and compile it to .rpyc with the SDK's own interpreter, headless.
 4. Assemble the "android.dist" tree that rapt.build.build() expects and
    invoke rapt.build.build() directly, exactly like the launcher does.
@@ -57,7 +58,7 @@ BASE_URL = "https://www.renpy.org/dl/" + RENPY_VERSION
 PACKAGE = "org.renpy.engine"
 APP_NAME = "Ren'Py Engine"
 ICON_NAME = "Ren'Py"
-NUMERIC_VERSION = 80605
+NUMERIC_VERSION = 80606
 
 WORK = os.environ.get("BUILD_WORK") or os.path.abspath("build-work")
 OUT = os.environ.get("BUILD_OUT") or os.path.abspath("out")
@@ -453,6 +454,48 @@ def patch_engine_and_rapt():
         "action project.Launch()",
         "action mobile_launch_action()",
     )
+
+    # --- 7b. launcher: fill phone screens. The launcher is laid out for an
+    #         800x600 window; on a 20:9 phone it was pillarboxed into a 4:3
+    #         box with small text. Keep the height (the layout needs it) and
+    #         widen the virtual screen to the device's aspect ratio; make the
+    #         backgrounds and window frames follow the width. ---
+    options_rpy = os.path.join(SDK, "launcher", "game", "options.rpy")
+    patch(
+        options_rpy,
+        """    config.screen_width = 800
+    config.screen_height = 600
+""",
+        """    config.screen_width = 800
+    config.screen_height = 600
+
+    # Ren'Py Engine port: fill the phone's screen (no black side bars).
+    if renpy.android:
+        try:
+            import os as _os
+
+            _size = _os.environ.get("RENPY_ENGINE_LAUNCHER_SIZE")  # simulator
+
+            if _size:
+                config.screen_width, config.screen_height = (int(_i) for _i in _size.lower().split("x"))
+            else:
+                _info = renpy.display.get_info()
+                _long = max(_info.current_w, _info.current_h)
+                _short = min(_info.current_w, _info.current_h)
+
+                if _long and _short:
+                    _aspect = max(4.0 / 3.0, min(2.4, float(_long) / _short))
+                    config.screen_width = int(round(600 * _aspect))
+        except Exception:
+            pass
+""",
+    )
+    style_rpy = os.path.join(SDK, "launcher", "game", "style.rpy")
+    patch_all(style_rpy, "xsize=794, xalign=1.0), xsize=800, ysize=600)", "xsize=config.screen_width - 6, xalign=1.0), xsize=config.screen_width, ysize=config.screen_height)")
+    patch_all(style_rpy, "BACKGROUND = Fixed(Solid(REVERSE_TEXT), xsize=800, ysize=600)", "BACKGROUND = Fixed(Solid(REVERSE_TEXT), xsize=config.screen_width, ysize=config.screen_height)")
+    patch(style_rpy, "    ypos 600 - 128 + 12\n", "    ypos config.screen_height - 128 + 12\n")
+    # Phone screens are small: draw the launcher's text 20% bigger.
+    patch(style_rpy, "    define gui.FONT_SCALE = 1.0\n", "    define gui.FONT_SCALE = 1.2 if renpy.android else 1.0\n")
 
     # --- 8. launcher: packaging features that need a PC toolchain notify
     #        and return on-device instead of crashing ---
