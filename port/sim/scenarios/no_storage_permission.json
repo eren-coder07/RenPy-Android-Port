@@ -1,0 +1,9 @@
+{"env": {"RENPY_ENGINE_SHARED_STORAGE": "/proc/no-storage-access", "SIM_ALL_FILES_ACCESS": "0"},
+ "steps": [["wait", 1], ["click", "Start using Ren'Py in English"], ["wait", 2],
+  ["expect", "Grant file access"], ["expect", "Example Game"],
+  ["py", "_sim_log('PROJECTS DIR', persistent.projects_directory)\nassert persistent.projects_directory.endswith('/public/RenPyProjects'), persistent.projects_directory"],
+  ["shot", "no-permission-front-page"],
+  ["click", "Grant file access"], ["wait", 1.5],
+  ["click", "Example Game"], ["wait", 1], ["click", "Launch Project"], ["wait", 4],
+  ["expect", "< Launcher"], ["click", "Launcher"], ["wait", 1.5], ["click", "Yes"], ["wait", 4],
+  ["expect", "Launch Project"]]}

@@ -27,6 +27,32 @@ jobs:
       - name: Install Python deps
         run: python3 -m pip install --quiet pillow
 
+      - name: Install simulator dependencies (Mesa EGL/GLES)
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y -q libegl1 libgles2 libegl-mesa0
+
+      - name: Simulate the device and run the UI scenarios
+        # Runs the packaged engine on Linux with Android code paths on
+        # (port/sim): launch/return, launcher tools, New Project, errors,
+        # missing storage permission. A crash fails the build before an
+        # APK is ever released.
+        run: |
+          sh port/sim/build_and_package.sh
+          python3 port/sim/run_scenarios.py --shots "$BUILD_WORK/sim-shots"
+        env:
+          BUILD_WORK: ${{ github.workspace }}/build-work
+
+      - name: Upload simulator screenshots and logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: simulator-screenshots
+          path: |
+            build-work/sim-shots/
+            build-work/sim-*.log
+          if-no-files-found: ignore
+
       - name: Install Android SDK components
         run: |
           yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --licenses > /dev/null || true
@@ -71,5 +97,5 @@ jobs:
           TAG="engine-v8.6.1-build.$GITHUB_RUN_NUMBER"
           gh release create "$TAG" \
             --title "Ren'Py Engine 8.6.1 - universal Android APK (arm32+arm64)" \
-            --notes "Ren'Py launcher packaged for on-device development. Launcher UI fonts fixed (first-run language chooser), New Project works on-device (gui template + sdk fonts shipped on disk), tutorial + The Question bundled, launcher commands (scan/lint/compile/gui images) run headless in-process and return to the launcher, packaging screens notify instead of crashing. Projects live in /storage/emulated/0/RenPyProjects (grant 'All files access' on Android 11+, or the app uses its own external directory)." \
+            --notes "Ren'Py launcher packaged for on-device development. Projects and launcher tools (Navigate Script, Lint, Force Recompile, Delete Persistent, Change GUI, New Project, translations, Extract Dialogue) run in-process and always return to the launcher; a '< Launcher' button leaves running projects; project errors show Ren'Py's error screen and never close the app; built-in file viewer with 'Open in editor app'. Projects live in /storage/emulated/0/RenPyProjects (tap 'Grant file access'), or in the app's own folder until access is granted. If the app ever closes, see renpy_crash.txt in the projects folder." \
             out/*.apk out/SHA256SUMS.txt

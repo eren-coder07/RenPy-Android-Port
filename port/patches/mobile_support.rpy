@@ -1,89 +1,42 @@
 ################################################################################
 
-## Ren'Py Engine on-device development support (v2).
+## Ren'Py Engine on-device development support (v3).
 ##
 ## Added to the launcher's game directory when packaging the Ren'Py Engine
 ## for Android (see port/build_android.py). It provides:
 ##
-##  - "Launch Project" on Android runs the selected project in-process
-##    through the custom bootstrap (port/patches/main.py) via a small state
-##    file in shared storage.
-##  - Launcher commands that the PC launcher runs through a second
-##    interpreter (project scans/dumps, lint, force-recompile, gui image
-##    generation, translations, ...) are routed through the same mechanism
-##    and automatically return to the launcher when done.
-##  - A projects directory that works with or without the "All files
-##    access" permission: /storage/emulated/0/RenPyProjects when the
-##    permission is granted, the app's own external directory otherwise.
-##  - A starter project ("Example Game") generated on first run.
-##  - A no-op text editor, so "Edit File" explains how to edit instead of
-##    crashing (projects are plain files any Android editor app can edit).
-##  - An overlay button that opens the "All files access" settings page
-##    when the permission has not been granted yet (Android 11+).
+##  - A projects directory that works with or without storage permission:
+##    <shared storage>/RenPyProjects when it is writable, the app's own
+##    external directory otherwise; switches over once access is granted.
+##    It is set up *before* the launcher's first project scan, together
+##    with a starter project ("Example Game").
+##  - Project.launch() on Android: projects and launcher commands (scans,
+##    lint, compile, gui images, translations, ...) cannot run in a second
+##    interpreter process, so they are handed to the custom bootstrap
+##    (port/patches/main.py) and run in-process; the launcher comes back
+##    when they finish - whatever way they finish.
+##  - Launcher flows that need a command's result (Navigate Script, Check
+##    Script, Change GUI, translations, ...) are resumed after the command
+##    ran: the flow's label is started again and the same launch() call
+##    returns at once, exactly as if the subprocess had finished.
+##  - A built-in file viewer used for "Edit File" links, lint reports and
+##    error reports, with an "Open in editor app" button.
+##  - A "Grant file access" overlay button when storage access is missing.
 
-init 100 python:
-    if renpy.android:
-        if not getattr(persistent, "projects_directory", None):
-            persistent.projects_directory = "/storage/emulated/0/RenPyProjects"
+init -10 python:
 
-init python:
-
-    import json
     import os as _ms_os
+    import json as _ms_json
     import time as _ms_time
 
-    _MS_PRIMARY_PROJECTS = "/storage/emulated/0/RenPyProjects"
+    def _ms_shared_storage():
+        return _ms_os.environ.get("RENPY_ENGINE_SHARED_STORAGE", "/storage/emulated/0")
 
-    def _ms_state_file():
-        return _ms_os.path.join(_ms_os.environ.get("ANDROID_PUBLIC", "/sdcard"), "renpy_engine_state.json")
+    _MS_PRIMARY_PROJECTS = _ms_os.path.join(_ms_shared_storage(), "RenPyProjects")
+    _MS_STARTER_NAME = "Example Game"
 
-    def _ms_read_state():
-        try:
-            with open(_ms_state_file(), "r") as f:
-                d = json.load(f)
-            if isinstance(d, dict):
-                return d
-        except Exception:
-            pass
-        return {}
-
-    def _ms_update_state(**kw):
-        state = _ms_read_state()
-        state.update(kw)
-        try:
-            tmp = _ms_state_file() + ".tmp"
-            with open(tmp, "w") as f:
-                json.dump(state, f)
-            _ms_os.replace(tmp, _ms_state_file())
-        except Exception as e:
-            renpy.notify("Could not write engine state: %s" % e)
-
-    def _ms_all_files_access():
-        """True when the engine can freely use shared storage."""
-        if not renpy.android:
-            return True
-
-        try:
-            from jnius import autoclass
-
-            Environment = autoclass("android.os.Environment")
-            return bool(Environment.isExternalStorageManager())
-        except Exception:
-            pass
-
-        # Android < 11 (or jnius unavailable): legacy storage rules apply.
-        try:
-            pub = _ms_os.environ.get("ANDROID_PUBLIC", "")
-            if pub:
-                test = _ms_os.path.join(pub, ".ms_write_test")
-                with open(test, "w") as f:
-                    f.write("ok")
-                _ms_os.unlink(test)
-                return True
-        except Exception:
-            pass
-
-        return True
+    def _ms_fallback_projects():
+        return _ms_os.path.join(_ms_os.environ.get("ANDROID_PUBLIC", config.renpy_base), "RenPyProjects")
 
     def _ms_writable(d):
         try:
@@ -97,47 +50,45 @@ init python:
         except Exception:
             return False
 
-    def _ms_fallback_projects():
-        return _ms_os.path.join(_ms_os.environ.get("ANDROID_PUBLIC", ""), "RenPyProjects")
+    def _ms_user_projects(d):
+        """Names of the projects in `d`, other than the starter project."""
+        try:
+            return [ i for i in _ms_os.listdir(d)
+                     if i != _MS_STARTER_NAME and not i.startswith(".")
+                     and _ms_os.path.isdir(_ms_os.path.join(d, i)) ]
+        except Exception:
+            return [ ]
 
     def _ms_pick_projects_directory():
         """
-        Runs at every launcher start. Keeps persistent.projects_directory
-        on shared storage when it is usable, falls back to the app's own
-        external directory when "All files access" has not been granted
-        yet, and switches back once the grant arrives (unless projects
-        were already created in the fallback).
+        Keeps persistent.projects_directory usable. Shared storage is
+        preferred; the app's own external directory is the fallback while
+        storage access is missing. Returns True if the directory changed.
         """
-        current = getattr(persistent, "projects_directory", None)
 
-        if current and _ms_writable(current):
-            return
+        current = persistent.projects_directory
+        fallback = _ms_fallback_projects()
+
+        if current and current != fallback and _ms_writable(current):
+            return False
 
         if _ms_writable(_MS_PRIMARY_PROJECTS):
+            # Switch to shared storage, unless the user already made
+            # projects in the fallback directory.
+            if current == fallback and _ms_user_projects(fallback):
+                return False
+
             persistent.projects_directory = _MS_PRIMARY_PROJECTS
-            return
+            return current != _MS_PRIMARY_PROJECTS
 
-        fb = _ms_fallback_projects()
-        if _ms_writable(fb):
-            persistent.projects_directory = fb
+        if current == fallback and _ms_writable(fallback):
+            return False
 
-    def _ms_open_storage_settings():
-        """Opens the system 'All files access' settings page."""
-        if not renpy.android:
-            renpy.notify("Desktop build: no storage permission needed.")
-            return
+        if _ms_writable(fallback):
+            persistent.projects_directory = fallback
+            return current != fallback
 
-        try:
-            from jnius import autoclass
-
-            Intent = autoclass("android.content.Intent")
-            Settings = autoclass("android.provider.Settings")
-            PythonActivity = autoclass("org.renpy.android.PythonSDLActivity")
-
-            intent = Intent(Settings.ACTION_MANAGE_ALL_FILES_ACCESS_PERMISSION)
-            PythonActivity.mActivity.startActivity(intent)
-        except Exception:
-            renpy.notify("Open Settings > Apps > Ren'Py Engine > Permissions.")
+        return False
 
     _MS_STARTER_SCRIPT = '''\
 define e = Character("Eileen", color="#c8ffc8")
@@ -148,7 +99,7 @@ define e = Character("Eileen", color="#c8ffc8")
 
 label start:
 
-    scene Solid("#40305a")
+    scene expression Solid("#40305a")
     with dissolve
 
     "Welcome to your first Ren'Py game, running entirely on your Android device."
@@ -171,116 +122,272 @@ label start:
     e "This project lives in your projects folder on device storage."
 
     "Now go and create something!"
+
+    return
 '''
 
-    def _ms_ensure_projects_directory():
-        """Creates the projects directory and the starter project."""
-        if not renpy.android:
-            return
-
-        _ms_pick_projects_directory()
-
+    def _ms_ensure_starter_project():
         base = persistent.projects_directory
 
         if not base:
             return
 
         try:
-            starter = _ms_os.path.join(base, "Example Game", "game")
+            starter = _ms_os.path.join(base, _MS_STARTER_NAME, "game")
             script = _ms_os.path.join(starter, "script.rpy")
 
-            if _ms_os.path.isdir(base) and not _ms_os.path.exists(script):
+            if _ms_os.path.isdir(base) and not _ms_os.path.exists(starter):
                 _ms_os.makedirs(starter, 0o777)
                 with open(script, "w") as f:
                     f.write(_MS_STARTER_SCRIPT)
         except Exception:
             pass
 
-    _ms_ensure_projects_directory()
-
-    # ------------------------------------------------------------------
-    # Crash-proofing of command runs.
-    #
-    # pending_cmd is set while a headless command (dump/lint/compile/...)
-    # is running. The bootstrap clears it when the command completes; if
-    # we boot and it is still set, the command died with the process.
-    # Count those failures and stop retrying after three, so a broken
-    # project cannot turn into an endless restart loop.
-    # ------------------------------------------------------------------
-
-    def _ms_boot_command_guard():
-        state = _ms_read_state()
-
-        if state.get("pending_cmd"):
-            _ms_update_state(pending_cmd=0, cmd_failures=int(state.get("cmd_failures") or 0) + 1)
-
+    # Runs before project.rpy (init 0) scans the projects directory, so the
+    # very first launcher start already lists the projects.
     if renpy.android:
-        _ms_boot_command_guard()
+        try:
+            _ms_pick_projects_directory()
+            _ms_ensure_starter_project()
+        except Exception:
+            pass
 
-    def _ms_run_project(gamedir, run_args=None, run_env=None):
-        """Writes the hand-off state file, then restarts into the project."""
-        state = _ms_read_state()
 
-        if run_args and (int(state.get("cmd_failures") or 0) >= 3):
-            renpy.notify(_("Engine commands keep failing; scans are disabled for this session."))
+init 1 python:
+
+    import importlib as _ms_importlib
+
+    # The custom bootstrap (port/patches/main.py), or None when this
+    # launcher runs under the stock renpy.py (desktop testing).
+    _ms_engine = getattr(_ms_importlib.import_module("renpy"), "__main__", None)
+
+    if not hasattr(_ms_engine, "engine_submit"):
+        _ms_engine = None
+
+    def _ms_on_device():
+        return renpy.android and (_ms_engine is not None)
+
+    # ------------------------------------------------------------------
+    # Launcher-side session state. renpy.session survives
+    # renpy.utter_restart() (the bootstrap keeps it aside while a project
+    # runs), store variables do not.
+    #
+    #   flow      the resumable launcher flow being run (a label), or None
+    #   tokens    keys of the jobs that finished during the flow
+    #   used      how many of each key this replay of the flow has used
+    #   deferred  jobs requested outside a resumable flow; run when the
+    #             launcher gets back to the front page
+    #   results   finished jobs not yet reported to the user
+    # ------------------------------------------------------------------
+
+    def _ms_state():
+        s = renpy.session.get("_ms_state")
+
+        if s is None:
+            s = renpy.session["_ms_state"] = {
+                "flow" : None,
+                "tokens" : [ ],
+                "used" : { },
+                "deferred" : [ ],
+                "results" : [ ],
+                }
+
+        return s
+
+    def _ms_collect_results():
+        if _ms_engine is None:
             return
 
-        new_state = {
-            "run_gamedir": gamedir,
-            "run_args": list(run_args) if run_args else None,
-            "run_env": {str(k): str(v) for k, v in (run_env or {}).items()},
-            "generation": int(_ms_time.time()),
-            "pending_cmd": 1 if run_args else 0,
+        s = _ms_state()
+
+        for r in _ms_engine.engine_take_results():
+            s["results"].append(r)
+            if r.get("key"):
+                s["tokens"].append(r["key"])
+
+    # Launcher labels that start a flow which can simply be started again
+    # after a command ran (no questions asked before the command), mapped
+    # to the label to resume at.
+    _MS_RESUMABLE = {
+        "navigation" : "navigation",
+        "navigation_loop" : "navigation",
+        "navigation_refresh" : "navigation_refresh",
+        "change_gui" : "change_gui",
+        "gui_generate_images" : "gui_generate_images",
+        "rmpersistent" : "rmpersistent",
+        "force_recompile" : "force_recompile",
+        "lint" : "_ms_lint_resume",
+        "generate_translations" : "generate_translations",
+        "extract_strings" : "extract_strings",
+        "merge_strings" : "merge_strings",
+        "update_renpy_strings" : "update_renpy_strings",
+        "start_extract_dialogue" : "start_extract_dialogue",
         }
 
-        _ms_update_state(**new_state)
+    # Labels that start flows which can NOT be replayed (they ask
+    # questions first). Commands requested in them are deferred.
+    _MS_NOT_RESUMABLE = {
+        "new_project", "new_gui_project", "gui_project_size",
+        "gui_project_common", "translate", "extract_dialogue",
+        "choose_theme",
+        }
 
+    _MS_DESKTOP_ONLY = {
+        "build_distributions" : _("Building distributions needs the desktop Ren'Py SDK. Copy the project folder to a PC to build it."),
+        "android" : _("Packaging Android apps needs the desktop Ren'Py SDK (Android SDK and Gradle)."),
+        "ios" : _("Packaging iOS apps needs the desktop Ren'Py SDK and Xcode."),
+        "web" : _("Packaging web games needs the desktop Ren'Py SDK."),
+        }
+
+    def _ms_label_callback(name, abnormal):
+        if not _ms_on_device():
+            return
+
+        # Pick up the results of jobs that ran since the last label, so a
+        # resumed flow finds its tokens.
+        _ms_collect_results()
+
+        s = _ms_state()
+
+        if name == "start":
+            # Every launcher start is a new replay of the current flow.
+            s["used"] = { }
+
+        if name in _MS_DESKTOP_ONLY:
+            # Packaging needs desktop toolchains (Android SDK/Gradle,
+            # Xcode, Emscripten): say so instead of failing half-way.
+            s["flow"] = None
+            renpy.notify(__(_MS_DESKTOP_ONLY[name]))
+            renpy.jump("front_page")
+
+        elif name in ("front_page", "before_front_page"):
+            s["flow"] = None
+            del s["tokens"][:]
+
+            if name == "front_page":
+                _ms_front_page()
+
+        elif name in _MS_RESUMABLE:
+            # Only the first label of a flow decides where it resumes
+            # (navigation -> navigation_loop is still "navigation").
+            if s["flow"] is None or name in ("lint", "change_gui"):
+                s["flow"] = _MS_RESUMABLE[name]
+
+        elif name in _MS_NOT_RESUMABLE:
+            s["flow"] = None
+            del s["tokens"][:]
+
+        elif name == "editor_preference":
+            # Preferences > Text editor: the desktop editor chooser and its
+            # downloads don't apply on Android.
+            renpy.notify(__("Files open in the built-in viewer; use \"Open in editor app\" to edit them."))
+            renpy.jump("preferences")
+
+    config.label_callbacks.append(_ms_label_callback)
+
+    def _ms_run(jobs, resume_label=None):
+        """Hands `jobs` to the bootstrap and restarts into them."""
+        _ms_engine.engine_submit(jobs, resume_label=resume_label)
         renpy.utter_restart()
 
+    def _ms_front_page():
+        """
+        Called each time the launcher reaches its front page: runs deferred
+        commands, then reports the results of finished ones.
+        """
+
+        s = _ms_state()
+
+        if s["deferred"]:
+            jobs = list(s["deferred"])
+            del s["deferred"][:]
+            _ms_run(jobs)
+
+        _ms_collect_results()
+
+        if s["results"]:
+            results = list(s["results"])
+            del s["results"][:]
+            del s["tokens"][:]
+            renpy.invoke_in_new_context(_ms_report_results, results)
+
+    def _ms_describe(r):
+        args = r.get("args") or [ ]
+        cmd = [ i for i in args[1:] if not i.startswith("--") and not _ms_os.path.isabs(i) ]
+        name = _ms_os.path.basename(_ms_os.path.dirname(r["gamedir"]))
+
+        if not cmd:
+            return name
+
+        return "%s: %s" % (name, " ".join(cmd[:3]))
+
+    def _ms_report_results(results):
+        failed = [ r for r in results if r.get("status") or r.get("errors") ]
+
+        if not failed:
+            commands = [ r for r in results if len(r.get("args") or [ ]) > 1 and not _ms_is_interactive(r["args"]) ]
+            if commands:
+                renpy.notify(__("Done: %s") % ", ".join(_ms_describe(r) for r in commands[-3:]))
+            return
+
+        parts = [ ]
+
+        for r in failed:
+            parts.append(__("{} ended with status {}.").format(_ms_describe(r), r.get("status")))
+
+            for fn in r.get("errors") or [ ]:
+                parts.append("\n== %s ==\n" % fn)
+                parts.append(_ms_read_text(fn))
+
+        _ms_show_text(__("Errors"), "\n".join(parts), filename=(failed[-1].get("errors") or [ None ])[-1])
+
+    def _ms_is_interactive(args):
+        # [project, --json-dump, file, ...]: no command between the project
+        # path and the flags.
+        return len(args) < 2 or args[1].startswith("--")
+
     # ------------------------------------------------------------------
-    # Project.launch: the PC launcher spawns a second interpreter, which
-    # does not exist on Android. Rebuild the exact command line the PC
-    # would use and hand it to the bootstrap's command mode instead.
+    # Project.launch: rebuild the exact command line the desktop launcher
+    # would spawn, and run it in-process instead.
     # ------------------------------------------------------------------
 
     _ms_desktop_launch = project.Project.launch
 
     def _ms_project_launch(self, args=[], wait=False, env={}):
-        if not renpy.android:
+        if not _ms_on_device():
             return _ms_desktop_launch(self, args=args, wait=wait, env=env)
 
-        state = _ms_read_state()
-
-        if state.get("pending_cmd"):
-            renpy.notify(_("A previous engine command is still pending."))
-            return
+        args = [ str(i) for i in args ]
 
         gamedir = _ms_os.path.join(self.path, "game")
 
         if not _ms_os.path.isdir(gamedir):
-            renpy.notify("%s: not a project." % self.name)
-            return
+            interface.error(_("[project] does not have a game directory."), project=self.name)
 
         if not args:
-            # Interactive run: make sure the project has a script before
-            # restarting into it.
+            # Interactive run: make sure the project has a script.
             has_script = False
 
-            try:
-                for fn in _ms_os.listdir(gamedir):
-                    if fn.endswith(".rpy") or fn.endswith(".rpyc"):
-                        has_script = True
-                        break
-            except Exception:
-                pass
+            for dn, dirs, files in _ms_os.walk(gamedir):
+                if any(fn.endswith((".rpy", ".rpyc", ".rpym", ".rpymc")) for fn in files):
+                    has_script = True
+                    break
 
             if not has_script:
-                renpy.notify("%s: no script found in game/." % self.name)
-                return
+                interface.error(_("[project] has no script files in its game directory."), project=self.name)
+
+        # The run creates game/saves (saves stay in the project), which
+        # moves get_dump_filename() from the launcher's tmp directory to
+        # game/saves. Create it now, so a resumed flow looks for the scan
+        # results where this run writes them.
+        try:
+            _ms_os.makedirs(_ms_os.path.join(gamedir, "saves"), 0o777)
+        except Exception:
+            pass
 
         # Exactly the command line the desktop launcher would spawn:
         # renpy.sh <project> <args...> --json-dump <file> [--errors-in-editor]
-        run_args = [self.path] + [str(i) for i in args]
+        run_args = [ self.path ] + args
 
         run_args.append("--json-dump")
         run_args.append(self.get_dump_filename())
@@ -294,28 +401,79 @@ label start:
         run_args.append("--errors-in-editor")
 
         run_env = {
-            "RENPY_LAUNCHER_LANGUAGE": _preferences.language or "english",
-        }
+            "RENPY_LAUNCHER_LANGUAGE" : _preferences.language or "english",
+            }
 
         if persistent.skip_splashscreen:
             run_env["RENPY_SKIP_SPLASHSCREEN"] = "1"
 
-        run_env.update(env or {})
+        run_env.update(env or { })
 
-        _ms_run_project(gamedir, run_args=run_args, run_env=run_env)
+        key = _ms_json.dumps([ self.path, args, sorted(run_env.items()) ])
+
+        job = {
+            "gamedir" : gamedir,
+            "args" : run_args,
+            "env" : run_env,
+            "key" : key,
+            "interactive" : not args,
+            }
+
+        _ms_collect_results()
+
+        s = _ms_state()
+
+        if not args:
+            # Run the project now. Pending commands go first.
+            jobs = list(s["deferred"]) + [ job ]
+            del s["deferred"][:]
+            _ms_run(jobs)
+
+        used = s["used"].get(key, 0)
+
+        if s["tokens"].count(key) > used:
+            # A resumed flow reached a launch() whose command already ran
+            # during this flow: return as the finished subprocess would.
+            s["used"][key] = used + 1
+
+            for r in s["results"]:
+                if r.get("key") == key:
+                    # Successful results need no report; failed ones are
+                    # shown when the launcher is back at its front page.
+                    if not (r.get("status") or r.get("errors")):
+                        s["results"].remove(r)
+
+                    # Like the desktop launcher: a non-zero exit status of
+                    # a waited-for command aborts the flow.
+                    if wait and r.get("status"):
+                        interface.error(_("Launching the project failed."), _("Please ensure that your project launches normally before running this command."))
+
+                    break
+
+            return
+
+        if s["flow"] is None:
+            # Not in a resumable flow (e.g. creating a project): carry on,
+            # run the command when the launcher is back at its front page.
+            s["deferred"].append(job)
+            return
+
+        jobs = list(s["deferred"]) + [ job ]
+        del s["deferred"][:]
+        _ms_run(jobs, resume_label=s["flow"])
 
     project.Project.launch = _ms_project_launch
 
     class MobileLaunch(Action):
         """
-        Replaces project.Launch() on the launcher's front page.
-
-        On Android it boots the project in-process through the patched
-        Project.launch; on desktop it keeps the original behavior.
+        The front page's "Launch Project" button.
         """
 
+        def get_sensitive(self):
+            return project.current is not None
+
         def __call__(self):
-            if not renpy.android:
+            if not _ms_on_device():
                 return project.Launch()()
 
             project.current.launch()
@@ -323,44 +481,247 @@ label start:
     def mobile_launch_action():
         if renpy.android:
             return MobileLaunch()
+
         return project.Launch()
 
     # ------------------------------------------------------------------
-    # No-op text editor. All launcher "Edit File" actions funnel through
-    # renpy.editor.editor (begin/open/end); on Android there is no editor
-    # process to spawn, so explain where to edit instead of crashing.
+    # File viewer / editor. There is no editor process to spawn on
+    # Android: "Edit File" links, lint reports and error reports open in a
+    # built-in viewer, which can hand the file to an editor app.
     # ------------------------------------------------------------------
 
-    class _MSEditorStub(object):
+    _MS_VIEW_LIMIT = 150000
 
-        def begin(self, *args, **kwargs):
-            pass
-
-        def end(self, *args, **kwargs):
-            pass
-
-        def open(self, fn, line=0, synchronize=False):
-            try:
-                rel = _ms_os.path.relpath(fn, persistent.projects_directory)
-            except Exception:
-                rel = fn
-            renpy.notify(_("Open %s in a text editor app (Acode, QuickEdit, ...).") % rel)
-
-    if renpy.android:
+    def _ms_read_text(fn):
         try:
-            # NOTE: never use a bare `import renpy.editor` here. Executed in
-            # the store, that statement rebinds the store's `renpy` name to
-            # the renpy *package* module, destroying the renpy.exports
-            # binding that minstore.py sets up (renpy.has_image, renpy.music,
-            # renpy.execute_default_statement, ... all disappear) and the
-            # launcher dies right after the presplash. import_module()
-            # touches no store names.
-            import importlib as _ms_importlib
+            with open(fn, "rb") as f:
+                data = f.read(_MS_VIEW_LIMIT + 1)
+        except Exception as e:
+            return __("Could not read %s: %s") % (fn, e)
 
-            _ms_renpy_editor = _ms_importlib.import_module("renpy.editor")
-            _ms_renpy_editor.editor = _MSEditorStub()
+        text = data[:_MS_VIEW_LIMIT].decode("utf-8", "replace").replace("﻿", "")
+
+        if len(data) > _MS_VIEW_LIMIT:
+            text += "\n\n" + __("(file truncated)")
+
+        return text
+
+    def _ms_show_text(title, text, filename=None, line=None):
+        renpy.call_screen("ms_text_viewer", title=title, text=text, filename=filename, line=line)
+
+    def _ms_view_file(fn, line=None):
+        renpy.invoke_in_new_context(_ms_show_text, _ms_os.path.basename(fn), _ms_read_text(fn), fn, line)
+
+    def _ms_open_in_app(fn):
+        """
+        Asks Android to open `fn` in a text editor app. Uses the app's
+        FileProvider (RAPT's RenPyFileProvider, which serves shared
+        storage), granting write access so the editor can save.
+        """
+
+        try:
+            from jnius import autoclass
+
+            Intent = autoclass("android.content.Intent")
+            File = autoclass("java.io.File")
+            RenPyFileProvider = autoclass("org.renpy.android.RenPyFileProvider")
+            PythonSDLActivity = autoclass("org.renpy.android.PythonSDLActivity")
+
+            activity = PythonSDLActivity.mActivity
+            uri = RenPyFileProvider.getUriForFile(activity, activity.getPackageName() + ".fileprovider", File(fn))
+
+            intent = Intent(Intent.ACTION_EDIT)
+            intent.setDataAndType(uri, "text/plain")
+            intent.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION | Intent.FLAG_GRANT_WRITE_URI_PERMISSION)
+
+            activity.startActivity(Intent.createChooser(intent, "Edit " + _ms_os.path.basename(fn)))
+            return
         except Exception:
             pass
+
+        try:
+            # RAPT's own viewer intent (read-only for some editors).
+            from jnius import autoclass
+
+            autoclass("org.renpy.android.PythonSDLActivity").mActivity.openEditor(fn)
+            return
+        except Exception:
+            pass
+
+        renpy.notify(__("No editor app could open the file. Open it from your editor app: %s") % fn)
+
+    def _ms_open_files(files):
+        """
+        Shows the files the launcher asked an editor to open (registered
+        with the bootstrap, called through renpy.editor.SystemEditor).
+        """
+
+        files = [ (fn, line) for fn, line in files if fn ]
+
+        if not files:
+            return
+
+        fn, line = files[0]
+
+        if len(files) > 1:
+            renpy.notify(__("%d files - showing %s") % (len(files), _ms_os.path.basename(fn)))
+
+        _ms_view_file(fn, line)
+
+    if _ms_engine is not None and hasattr(_ms_engine, "engine_set_open_files_handler"):
+        _ms_engine.engine_set_open_files_handler(_ms_open_files)
+
+    if renpy.android:
+        # No desktop editors to choose or download on Android: never show
+        # the "Select Editor" screen before opening a file.
+        editor.set_editor = False
+
+    # ------------------------------------------------------------------
+    # Storage access.
+    # ------------------------------------------------------------------
+
+    def _ms_sdk_int():
+        try:
+            from jnius import autoclass
+            return int(autoclass("android.os.Build$VERSION").SDK_INT)
+        except Exception:
+            return 0
+
+    def _ms_query_all_files_access():
+        if not renpy.android:
+            return True
+
+        if _ms_sdk_int() >= 30:
+            try:
+                from jnius import autoclass
+                return bool(autoclass("android.os.Environment").isExternalStorageManager())
+            except Exception:
+                pass
+
+        # Android 10 and below (legacy storage): the runtime permission.
+        try:
+            return renpy.check_permission("android.permission.WRITE_EXTERNAL_STORAGE") or _ms_writable(_MS_PRIMARY_PROJECTS)
+        except Exception:
+            return True
+
+    _ms_access_cache = [ 0.0, True ]
+
+    def _ms_all_files_access():
+        """Cached for two seconds: screens evaluate this often."""
+        now = _ms_time.time()
+
+        if now - _ms_access_cache[0] > 2.0:
+            was = _ms_access_cache[1]
+            _ms_access_cache[0] = now
+            _ms_access_cache[1] = _ms_query_all_files_access()
+
+            if _ms_access_cache[1] and not was:
+                _ms_storage_granted()
+
+        return _ms_access_cache[1]
+
+    def _ms_storage_granted():
+        try:
+            if _ms_pick_projects_directory():
+                _ms_ensure_starter_project()
+                project.manager.scan()
+                renpy.notify(__("Projects folder: %s") % persistent.projects_directory)
+            renpy.restart_interaction()
+        except Exception:
+            pass
+
+    def _ms_open_storage_settings():
+        """Asks for storage access: the settings page (Android 11+) or the
+        runtime permission dialog (Android 10 and below)."""
+
+        if not renpy.android:
+            renpy.notify(_("Desktop build: no storage permission needed."))
+            return
+
+        if _ms_sdk_int() < 30:
+            try:
+                renpy.request_permission("android.permission.WRITE_EXTERNAL_STORAGE")
+            except Exception:
+                pass
+
+            _ms_access_cache[0] = 0.0
+            renpy.restart_interaction()
+            return
+
+        try:
+            from jnius import autoclass
+
+            Intent = autoclass("android.content.Intent")
+            Settings = autoclass("android.provider.Settings")
+            Uri = autoclass("android.net.Uri")
+            PythonSDLActivity = autoclass("org.renpy.android.PythonSDLActivity")
+            activity = PythonSDLActivity.mActivity
+
+            try:
+                intent = Intent(Settings.ACTION_MANAGE_APP_ALL_FILES_ACCESS_PERMISSION, Uri.parse("package:" + activity.getPackageName()))
+                activity.startActivity(intent)
+            except Exception:
+                activity.startActivity(Intent(Settings.ACTION_MANAGE_ALL_FILES_ACCESS_PERMISSION))
+
+        except Exception:
+            renpy.notify(_("Open Settings > Apps > Ren'Py Engine > Permissions."))
+
+    # The projects directory chooser (tinyfiledialogs) does not exist on
+    # Android: keep the automatically managed directory.
+    if renpy.android:
+        def choose_directory(default_path):
+            _ms_pick_projects_directory()
+            return (persistent.projects_directory or _ms_fallback_projects(), True)
+
+
+# Resumes "Check Script (Lint)" after the lint command ran (the original
+# label is called from the front page, a call stack the restart lost).
+label _ms_lint_resume:
+    call lint
+    jump front_page
+
+
+screen ms_text_viewer(title, text, filename=None, line=None):
+
+    modal True
+    zorder 200
+
+    add "#000000e8"
+
+    frame:
+        background "#1d1f24"
+        xfill True
+        yfill True
+        xmargin 16
+        ymargin 16
+        xpadding 16
+        ypadding 12
+
+        side "t c b":
+            spacing 10
+
+            vbox:
+                text "[title!q]" size 28 color "#ffffff"
+                if filename:
+                    text "[filename!q]" size 16 color "#a0a8b8"
+
+            viewport:
+                scrollbars "vertical"
+                mousewheel True
+                draggable True
+
+                text text substitute False size 18 color "#e8e8e8" font "DejaVuSans.ttf"
+
+            hbox:
+                xalign 1.0
+                spacing 40
+
+                if filename and renpy.android:
+                    textbutton _("Open in editor app") action Function(_ms_open_in_app, filename) text_size 24 text_color "#8cc8ff" text_hover_color "#ffffff"
+
+                textbutton _("Close") action Return(True) text_size 24 text_color "#ffd28c" text_hover_color "#ffffff"
+
+    key "game_menu" action Return(True)
 
 
 screen ms_storage_nag():
@@ -396,7 +757,12 @@ init 1000 python:
                 return True
 
             def __call__(self):
-                renpy.notify(_("Use a file manager app to open: %s") % self.path)
+                path = self.path
+
+                if (not self.absolute) and (project.current is not None):
+                    path = _ms_os.path.join(project.current.path, path)
+
+                renpy.notify(__("Open this folder in a file manager app: %s") % path)
 
         OpenDirectory = _MSOpenDirectory
 

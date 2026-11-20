@@ -1,0 +1,13 @@
+[["wait", 1], ["click", "Start using Ren'Py in English"], ["wait", 2],
+ ["click", "Create New Project"], ["wait", 1.5], ["click", "Continue"], ["wait", 1.5],
+ ["type", "My Game"], ["wait", 1], ["key", "K_RETURN"], ["wait", 2],
+ ["click", "1280x720"], ["wait", 1], ["click", "Continue"], ["wait", 3], ["shot", "new-project-colors"],
+ ["click", "Continue"], ["wait", 30],
+ ["expect", "selected Select project My Game"], ["expect", "Edit screens.rpy"], ["shot", "new-project-created"],
+ ["click", "Launch Project"], ["wait", 6],
+ ["expect", "Start"], ["expect", "< Launcher"], ["shot", "new-project-main-menu"],
+ ["click", "Start"], ["wait", 2], ["tap"], ["wait", 2], ["shot", "new-project-playing"],
+ ["click", "Launcher"], ["wait", 1.5], ["click", "Yes"], ["wait", 5],
+ ["expect", "selected Select project My Game"],
+ ["click", "Change/Update GUI"], ["wait", 8], ["shot", "change-gui"],
+ ["expect", "Regenerate the image files"]]
