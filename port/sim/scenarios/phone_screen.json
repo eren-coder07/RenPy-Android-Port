@@ -1,0 +1,13 @@
+{"env": {"RENPY_ENGINE_LAUNCHER_SIZE": "1333x600"},
+ "steps": [["wait", 2], ["shot", "phone-language"],
+  ["click", "Start using Ren'Py in English"], ["wait", 2],
+  ["click", "Example Game"], ["wait", 1.5], ["shot", "phone-front-page"],
+  ["expect", "Launch Project"], ["expect", "+ Create New Project"], ["expect", "Extract Dialogue"],
+  ["py", "_sim_log('SIZE', config.screen_width, config.screen_height, 'large_print', persistent.large_print)"],
+  ["click", "preferences"], ["wait", 1.5], ["shot", "phone-preferences"], ["click", "Return"], ["wait", 1.5],
+  ["click", "Navigate Script"], ["wait", 6], ["shot", "phone-navigate"], ["click", "Return"], ["wait", 1.5],
+  ["click", "Edit script.rpy"], ["wait", 1.5], ["shot", "phone-viewer"], ["expect", "Close"], ["click", "Close"], ["wait", 1],
+  ["click", "Create New Project"], ["wait", 1.5], ["shot", "phone-new-project-info"], ["click", "Continue"], ["wait", 1.5],
+  ["type", "Phone Game"], ["wait", 1], ["key", "K_RETURN"], ["wait", 2], ["shot", "phone-new-project-size"],
+  ["click", "1280x720"], ["wait", 1], ["click", "Continue"], ["wait", 3], ["shot", "phone-new-project-colors"],
+  ["expect", "Continue"]]}

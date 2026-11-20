@@ -686,6 +686,16 @@ init 1 python:
             return (persistent.projects_directory or _ms_fallback_projects(), True)
 
 
+# Large fonts on phones: the launcher's own "Large fonts" preference
+# (Preferences), on by default on Android; it can still be turned off there.
+# (The launcher is also widened to the phone's aspect ratio: see the
+# options.rpy / style.rpy patches in port/build_android.py.)
+# (init -100: before style.rpy turns font sizes into styles.)
+init -100 python:
+    if renpy.android and persistent.large_print is None:
+        persistent.large_print = True
+
+
 # Resumes "Check Script (Lint)" after the lint command ran (the original
 # label is called from the front page, a call stack the restart lost).
 label _ms_lint_resume:
@@ -713,25 +723,25 @@ screen ms_text_viewer(title, text, filename=None, line=None):
             spacing 10
 
             vbox:
-                text "[title!q]" size 28 color "#ffffff"
+                text "[title!q]" size 34 color "#ffffff"
                 if filename:
-                    text "[filename!q]" size 16 color "#a0a8b8"
+                    text "[filename!q]" size 20 color "#a0a8b8"
 
             viewport:
                 scrollbars "vertical"
                 mousewheel True
                 draggable True
 
-                text text substitute False size 18 color "#e8e8e8" font "DejaVuSans.ttf"
+                text text substitute False size 24 color "#e8e8e8" font "DejaVuSans.ttf"
 
             hbox:
                 xalign 1.0
                 spacing 40
 
                 if _ms_can_open_in_app(filename):
-                    textbutton _("Open in editor app") action Function(_ms_open_in_app, filename) text_size 24 text_color "#8cc8ff" text_hover_color "#ffffff"
+                    textbutton _("Open in editor app") action Function(_ms_open_in_app, filename) text_size 30 text_color "#8cc8ff" text_hover_color "#ffffff"
 
-                textbutton _("Close") action Return(True) text_size 24 text_color "#ffd28c" text_hover_color "#ffffff"
+                textbutton _("Close") action Return(True) text_size 30 text_color "#ffd28c" text_hover_color "#ffffff"
 
     key "game_menu" action Return(True)
 
@@ -752,7 +762,7 @@ screen ms_storage_nag():
 
             textbutton _("Grant file access"):
                 action Function(_ms_open_storage_settings)
-                text_size 20
+                text_size 26
                 text_color "#ffd28c"
 
 init 1000 python:
